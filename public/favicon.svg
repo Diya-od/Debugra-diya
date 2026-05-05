@@ -1,12 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <!-- Dark background -->
   <rect width="32" height="32" rx="8" fill="#0d0d0d"/>
-  <!-- Lightning bolt / debug symbol in purple -->
-  <path d="M19 4L9 17h7.5L14 28l11-13h-7.5L19 4z" fill="url(#grad)"/>
-  <defs>
-    <linearGradient id="grad" x1="9" y1="4" x2="25" y2="28" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#8b5cf6"/>
-      <stop offset="1" stop-color="#6d28d9"/>
-    </linearGradient>
-  </defs>
+  <path d="M19 4L9 17h7.5L14 28l11-13h-7.5L19 4z" fill="#4ec9b0"/>
 </svg>
