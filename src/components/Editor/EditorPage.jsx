@@ -53,6 +53,7 @@ export default function EditorPage({ user }) {
     new URLSearchParams(window.location.search).get('testRoom') === '1';
   const navigate = useNavigate();
   const editorRef = useRef(null);
+  const monacoRef = useRef(null);
 
   // ─── UI State ──────────────────────────────────────────────────────────────
   const [copied, setCopied] = useState(false);
@@ -83,23 +84,22 @@ export default function EditorPage({ user }) {
 
   // ─── Editor Logic ──────────────────────────────────────────────────────────
   const handleCopyOutput = async () => {
-  if (!execution.stdout) return;
+    if (!execution.stdout) return;
 
-      try {
-        await navigator.clipboard.writeText(execution.stdout);
+    try {
+      await navigator.clipboard.writeText(execution.stdout);
 
-        setCopied(true);
+      setCopied(true);
 
-        toast.success('Output copied!');
+      toast.success('Output copied!');
 
-        setTimeout(() => {
-          setCopied(false);
-        }, 2000);
-
-      } catch (err) {
-        toast.error('Failed to copy output');
-      }
-    };
+      setTimeout(() => {
+        setCopied(false);
+      }, 2000);
+    } catch (err) {
+      toast.error('Failed to copy output');
+    }
+  };
 
   const editor = useEditor({
     user,
@@ -151,6 +151,7 @@ export default function EditorPage({ user }) {
 
   // ─── Monaco Setup ─────────────────────────────────────────────────────────
   const handleEditorWillMount = (monaco) => {
+    monacoRef.current = monaco;
     if (!window.__MONACO_SNIPPETS_REGISTERED__) {
       registerSnippets(monaco);
       window.__MONACO_SNIPPETS_REGISTERED__ = true;
@@ -258,6 +259,81 @@ export default function EditorPage({ user }) {
     });
   };
 
+  // Exposed formatting function for tests and fallback usage
+  const runFormatter = async (editorInstanceParam) => {
+    try {
+      const instance = editorInstanceParam || editorRef.current;
+      const monaco = monacoRef.current;
+      if (!instance || !monaco) return;
+      const model = instance.getModel();
+      if (!model) return;
+
+      const selection = instance.getSelection();
+      const startOffset = model.getOffsetAt(selection.getStartPosition());
+      const endOffset = model.getOffsetAt(selection.getEndPosition());
+
+      const prettierModule = await import('prettier/standalone');
+      const prettier =
+        prettierModule && prettierModule.default ? prettierModule.default : prettierModule;
+      const parserBabelModule = await import('prettier/parser-babel');
+      const parserBabel =
+        parserBabelModule && parserBabelModule.default
+          ? parserBabelModule.default
+          : parserBabelModule;
+      const parserTSModule = await import('prettier/parser-typescript');
+      const parserTS =
+        parserTSModule && parserTSModule.default ? parserTSModule.default : parserTSModule;
+
+      const langKey = editor.language || 'javascript';
+      let plugins = [parserBabel];
+      let parserName = 'babel';
+      if (langKey === 'typescript') {
+        plugins = [parserTS];
+        parserName = 'typescript';
+      }
+
+      const original = model.getValue();
+      const formatted = prettier.format(original, {
+        parser: parserName,
+        plugins,
+        semi: true,
+        singleQuote: true,
+        tabWidth: editor.tabSize || 2,
+      });
+
+      model.pushEditOperations(
+        [],
+        [
+          {
+            range: model.getFullModelRange(),
+            text: formatted,
+          },
+        ],
+        () => null
+      );
+
+      const newStartPos = model.getPositionAt(Math.min(startOffset, formatted.length));
+      const newEndPos = model.getPositionAt(Math.min(endOffset, formatted.length));
+      const Range = monaco.Range;
+      instance.setSelection(
+        new Range(
+          newStartPos.lineNumber,
+          newStartPos.column,
+          newEndPos.lineNumber,
+          newEndPos.column
+        )
+      );
+
+      editor.setCode(formatted);
+      toast.success('Formatted');
+    } catch (err) {
+      console.error('Formatting error', err);
+      try {
+        toast.error('Formatting failed');
+      } catch {}
+    }
+  };
+
   const handleEditorMount = (editorInstance) => {
     editorRef.current = editorInstance;
     editorInstance.onDidChangeCursorPosition((e) => {
@@ -266,6 +342,176 @@ export default function EditorPage({ user }) {
     // Ctrl+Enter → Run
     editorInstance.addCommand(2048 | 3, () => {
       if (executionRunRef.current) executionRunRef.current();
+    });
+
+    // Ctrl/Cmd+S → Format (Prettier)
+    try {
+      const monaco = monacoRef.current;
+      if (monaco) {
+        const SAVE_KEYBIND = monaco.KeyMod.CtrlCmd | monaco.KeyCode.KEY_S;
+        editorInstance.addCommand(SAVE_KEYBIND, async () => {
+          // Preserve selection offsets
+          const model = editorInstance.getModel();
+          if (!model) return;
+          const selection = editorInstance.getSelection();
+          const startOffset = model.getOffsetAt(selection.getStartPosition());
+          const endOffset = model.getOffsetAt(selection.getEndPosition());
+
+          try {
+            // Dynamically import Prettier and parsers to avoid bundling unless used
+            const prettierModule = await import('prettier/standalone');
+            const prettier =
+              prettierModule && prettierModule.default ? prettierModule.default : prettierModule;
+            const parserBabelModule = await import('prettier/parser-babel');
+            const parserBabel =
+              parserBabelModule && parserBabelModule.default
+                ? parserBabelModule.default
+                : parserBabelModule;
+            const parserTSModule = await import('prettier/parser-typescript');
+            const parserTS =
+              parserTSModule && parserTSModule.default ? parserTSModule.default : parserTSModule;
+
+            const langKey = editor.language || 'javascript';
+            let plugins = [parserBabel];
+            let parserName = 'babel';
+            if (langKey === 'typescript') {
+              plugins = [parserTS];
+              parserName = 'typescript';
+            }
+
+            // Use editor's code value
+            const original = model.getValue();
+            const formatted = prettier.format(original, {
+              parser: parserName,
+              plugins,
+              semi: true,
+              singleQuote: true,
+              tabWidth: editor.tabSize || 2,
+            });
+
+            // Apply full-model edit (keeps undo stack) and attempt to restore selection by offsets
+            model.pushEditOperations(
+              [],
+              [
+                {
+                  range: model.getFullModelRange(),
+                  text: formatted,
+                },
+              ],
+              () => null
+            );
+
+            // Ensure model/view are updated before test assertions
+            await new Promise((r) => setTimeout(r, 250));
+
+            const newStartPos = model.getPositionAt(Math.min(startOffset, formatted.length));
+            const newEndPos = model.getPositionAt(Math.min(endOffset, formatted.length));
+            // Create a Range using Monaco API
+            const Range = monaco.Range;
+            editorInstance.setSelection(
+              new Range(
+                newStartPos.lineNumber,
+                newStartPos.column,
+                newEndPos.lineNumber,
+                newEndPos.column
+              )
+            );
+
+            // Update internal state
+            editor.setCode(formatted);
+            toast.success('Formatted');
+          } catch (err) {
+            // If formatting fails, do not disrupt save flow
+            console.error('Formatting error', err);
+            toast.error('Formatting failed');
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('Could not register save formatter', err);
+    }
+    // Also intercept keydown on the Monaco editor to prevent the browser's
+    // default Save dialog (Cmd/Ctrl+S) and trigger formatting instead.
+    editorInstance.onKeyDown((e) => {
+      try {
+        const monaco = monacoRef.current;
+        if (!monaco) return;
+        const isSave = (e.ctrlKey || e.metaKey) && e.keyCode === monaco.KeyCode.KEY_S;
+        if (isSave) {
+          e.preventDefault();
+          e.stopPropagation();
+          // Reuse the same command by triggering the Monaco command we registered.
+          // Some Monaco builds don't expose the command id, so call the formatter directly.
+          (async () => {
+            const model = editorInstance.getModel();
+            if (!model) return;
+            try {
+              const prettierModule = await import('prettier/standalone');
+              const prettier =
+                prettierModule && prettierModule.default ? prettierModule.default : prettierModule;
+              const parserBabelModule = await import('prettier/parser-babel');
+              const parserBabel =
+                parserBabelModule && parserBabelModule.default
+                  ? parserBabelModule.default
+                  : parserBabelModule;
+              const parserTSModule = await import('prettier/parser-typescript');
+              const parserTS =
+                parserTSModule && parserTSModule.default ? parserTSModule.default : parserTSModule;
+
+              const langKey = editor.language || 'javascript';
+              let plugins = [parserBabel];
+              let parserName = 'babel';
+              if (langKey === 'typescript') {
+                plugins = [parserTS];
+                parserName = 'typescript';
+              }
+
+              const selection = editorInstance.getSelection();
+              const startOffset = model.getOffsetAt(selection.getStartPosition());
+              const endOffset = model.getOffsetAt(selection.getEndPosition());
+
+              const original = model.getValue();
+              const formatted = prettier.format(original, {
+                parser: parserName,
+                plugins,
+                semi: true,
+                singleQuote: true,
+                tabWidth: editor.tabSize || 2,
+              });
+
+              model.pushEditOperations(
+                [],
+                [
+                  {
+                    range: model.getFullModelRange(),
+                    text: formatted,
+                  },
+                ],
+                () => null
+              );
+
+              const newStartPos = model.getPositionAt(Math.min(startOffset, formatted.length));
+              const newEndPos = model.getPositionAt(Math.min(endOffset, formatted.length));
+              const Range = monacoRef.current.Range;
+              editorInstance.setSelection(
+                new Range(
+                  newStartPos.lineNumber,
+                  newStartPos.column,
+                  newEndPos.lineNumber,
+                  newEndPos.column
+                )
+              );
+              editor.setCode(formatted);
+              toast.success('Formatted');
+            } catch (err) {
+              console.error('Formatting error', err);
+              toast.error('Formatting failed');
+            }
+          })();
+        }
+      } catch (err) {
+        // swallow
+      }
     });
   };
 
@@ -292,7 +538,14 @@ export default function EditorPage({ user }) {
   const editorFileName = LANG_FILE_NAMES[editor.language] || 'main.txt';
 
   return (
-    <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', '--blur-intensity': `${blurIntensity}px` }}>
+    <div
+      style={{
+        height: '100dvh',
+        display: 'flex',
+        flexDirection: 'column',
+        '--blur-intensity': `${blurIntensity}px`,
+      }}
+    >
       {/* ===== TOP BAR ===== */}
       <div className="topbar px-2 px-md-3">
         <div className="topbar-left d-flex align-items-center">
@@ -722,7 +975,11 @@ export default function EditorPage({ user }) {
                 <Settings size={14} />
               </button>
               {showSettings && (
-                <div className="audio-settings-popover custom-layout-popover" role="dialog" aria-label="Settings">
+                <div
+                  className="audio-settings-popover custom-layout-popover"
+                  role="dialog"
+                  aria-label="Settings"
+                >
                   <div className="audio-settings-head">
                     <span>Settings</span>
                     <button
@@ -777,7 +1034,9 @@ export default function EditorPage({ user }) {
                       <i className="bi bi-sliders" style={{ fontSize: '14px' }} />
                       <span>Wallpaper Blur</span>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}
+                    >
                       <input
                         type="range"
                         min="0"
@@ -785,7 +1044,7 @@ export default function EditorPage({ user }) {
                         step="1"
                         value={blurIntensity}
                         onChange={(e) => setBlurIntensity(Number(e.target.value))}
-                        style={{ flex: 1, accentColor: '#00bcd4' }} 
+                        style={{ flex: 1, accentColor: '#00bcd4' }}
                       />
                       <span style={{ fontSize: '12px', minWidth: '30px', textAlign: 'right' }}>
                         {blurIntensity}px
@@ -951,7 +1210,9 @@ export default function EditorPage({ user }) {
                 },
                 suggestOnTriggerCharacters: true,
                 quickSuggestions: true,
-                formatOnPaste: true,
+                // Only format on explicit save (Cmd/Ctrl+S). Disable automatic
+                // formatting when pasting so pasted code isn't reformatted immediately.
+                formatOnPaste: false,
               }}
             />
           </div>
@@ -1308,12 +1569,7 @@ export default function EditorPage({ user }) {
           onStatusChange={() => setApiKeyStatus(getApiKeyStatus())}
         />
       )}
-{showAccount && user && (
-  <AccountSettings
-    onClose={() => setShowAccount(false)}
-    user={user}
-  />
-)}
+      {showAccount && user && <AccountSettings onClose={() => setShowAccount(false)} user={user} />}
 
       {/* Debug Overlay */}
       <DebugOverlay
@@ -1343,8 +1599,8 @@ export default function EditorPage({ user }) {
   />
 )}
 
-{/* Real-time Democratic Vote Popup */}
-<VotePopup room={room} user={user} />
+      {/* Real-time Democratic Vote Popup */}
+      <VotePopup room={room} user={user} />
     </div>
   );
 }
